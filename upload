@@ -1,0 +1,100 @@
+#!/bin/sh
+
+SELF="`basename $0`"
+SELF_HOME="`dirname $0`"
+DATE=`date +%Y%d%m%H%M` 
+COUCHDB_URL="${COUCHDB_URL:-http://localhost:5984}"
+UPLOAD_DB_URL="${1:-${COUCHDB_URL}/downloads}"
+FILE="$2"
+#DIST_DIR=${DIST_DIR:-dist}
+#DIST_ARCHIVE=${DIST_ARCHIVE:-medic-demos-${DATE}.tgz}
+#FILE="${DIST_DIR}/${DIST_ARCHIVE}"
+
+_exitError () {
+    echo "Exiting: $1"
+    exit 1
+}
+
+_escapeURL () {
+    local str="$1"
+    local cmd="node -e \"console.log(encodeURIComponent('${str}'));\""
+    echo `"$cmd" | tr -d '\n' | tr -d '\r'`
+}
+
+_log () {
+    echo `date -u '+%FT%T%Z - log: '` $1
+}
+
+_hasDB () {
+    test -n "$1" || _exitError "Database argument is empty."
+    curl -s -f "$1" | grep 'db_name' > /dev/null 
+}
+
+_createDB () {
+    test -n "$1" || _exitError "Database argument is empty."
+    curl -f -X PUT "$1"
+}
+
+_hasDoc () {
+    curl -s -f "$1" > /dev/null 
+}
+
+_createDoc () {
+    local d=`date +%Y-%m-%dT%H:%M:%S%z`
+    # creates empty doc
+    curl -f -d "{}" -X PUT "$1" > /dev/null
+}
+
+# Overwrite file attachment if exists
+_attachFile () {
+    local doc="$1"
+    local path="$2"
+    local filename=`basename "$path"`
+    test -n "$doc" || _exitError "Missing Document URL parameter."
+    test -n "$path" || _exitError "Missing path parameter."
+    test -f "$path" || _exitError "File not found: $path"
+    local rev=`curl -f -s -I -XHEAD "${doc}" | grep -Fi etag | sed 's/.*: //'`
+    # remove quotes and new lines from rev
+    rev=`echo "$rev" | sed 's/\"//g' | tr -d '\n' | tr -d '\r'`
+    if [ -n $rev ]; then
+        curl -f -X PUT -H "Content-Type: application/octet-stream" \
+            --data-binary "@${path}" \
+            "${doc}/${filename}?rev=${rev}"
+    else
+        curl -f -X PUT -H "Content-Type: application/octet-stream" \
+            --data-binary "@${path}" \
+            "${doc}/${filename}"
+    fi
+}
+
+_usage () {
+    echo "Uploads CouchDB attachment based on filename."
+    echo "Usage: $SELF <database url> <path to file>"
+    exit 1
+}
+
+if [ $? != 0 ]; then
+    echo "Failed to source functions lib."
+    exit 1
+fi
+
+if [ -z "$FILE" ]; then
+    _usage
+fi
+
+ID="`basename $FILE`"
+DOC_URL="$UPLOAD_DB_URL/$ID"
+
+if [ ! -f "$FILE" ]; then
+    echo "Can't find file: \"$FILE\""
+    exit 1
+fi
+
+_log "Uploading..."
+
+(_hasDB "$UPLOAD_DB_URL" || _createDB "$UPLOAD_DB_URL" ) || _exitError "Failed to init db."
+(_hasDoc "$DOC_URL" || _createDoc "$DOC_URL") || _exitError "Failed to init document."
+_attachFile "$DOC_URL" "$FILE" || _exitError "Failed to upload attachment."
+
+# strip auth info when printing location
+_log "Download now available at: ${DOC_URL}/${ID}" | sed 's/\/\/.*@/\/\//'
